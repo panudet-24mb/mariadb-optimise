@@ -2,10 +2,6 @@
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
-:: ===================================================================
-:: MariaDB Auto Configuration Script
-:: Automatically detect RAM and configure MariaDB for optimal performance
-:: ===================================================================
 
 echo.
 echo =========================================
@@ -13,7 +9,7 @@ echo  MariaDB Auto Configuration Script
 echo =========================================
 echo.
 
-:: ตรวจสอบสิทธิ์ Administrator
+
 net session >nul 2>&1
 if %errorLevel% neq 0 (
     echo [ERROR] กรุณารันสคริปต์นี้ด้วยสิทธิ์ Administrator!
@@ -22,13 +18,12 @@ if %errorLevel% neq 0 (
     exit /b 1
 )
 
-:: กำหนด path ของ MariaDB (ปรับตามเครื่องของคุณ)
+
 set "MARIADB_PATH=D:\Program Files\MariaDB 10.6"
 set "CONFIG_FILE=%MARIADB_PATH%\data\my.ini"
 set "BACKUP_FILE=%MARIADB_PATH%\data\my.ini.backup.%date:~-4,4%%date:~-10,2%%date:~-7,2%_%time:~0,2%%time:~3,2%%time:~6,2%"
 set "BACKUP_FILE=%BACKUP_FILE: =0%"
 
-:: แสดง path ที่จะใช้งาน
 echo ตำแหน่งไฟล์:
 echo =========================================
 echo Config File: %CONFIG_FILE%
@@ -36,7 +31,7 @@ echo Backup File: %BACKUP_FILE%
 echo =========================================
 echo.
 
-:: ตรวจสอบว่า config file มีอยู่จริง
+
 if not exist "%CONFIG_FILE%" (
     echo [ERROR] ไม่พบไฟล์ config: %CONFIG_FILE%
     echo กรุณาตรวจสอบ path ของ MariaDB
@@ -44,7 +39,7 @@ if not exist "%CONFIG_FILE%" (
     exit /b 1
 )
 
-:: Backup config เดิม
+
 echo [1/5] กำลัง Backup config เดิม...
 copy "%CONFIG_FILE%" "%BACKUP_FILE%" >nul
 if %errorLevel% equ 0 (
@@ -56,7 +51,7 @@ if %errorLevel% equ 0 (
     exit /b 1
 )
 
-:: ตรวจสอบ RAM (MB)
+
 echo.
 echo [2/5] กำลังตรวจสอบ RAM...
 for /f "tokens=2 delims==" %%a in ('wmic computersystem get TotalPhysicalMemory /value ^| find "="') do set RAM_BYTES=%%a
@@ -64,31 +59,31 @@ set /a RAM_MB=%RAM_BYTES:~0,-6%
 set /a RAM_GB=%RAM_MB% / 1024
 echo [OK] ตรวจพบ RAM: %RAM_GB% GB (%RAM_MB% MB)
 
-:: คำนวณค่า config ตาม RAM
+
 echo.
 echo [3/5] กำลังคำนวณค่า config...
 
-:: InnoDB Buffer Pool (75% of RAM)
+
 set /a BUFFER_POOL_MB=%RAM_MB% * 75 / 100
 set /a BUFFER_POOL_INSTANCES=%RAM_GB% / 4
 if %BUFFER_POOL_INSTANCES% lss 4 set BUFFER_POOL_INSTANCES=4
 if %BUFFER_POOL_INSTANCES% gtr 32 set BUFFER_POOL_INSTANCES=32
 
-:: Temporary Tables (10% of RAM)
+
 set /a TMP_TABLE_MB=%RAM_MB% * 10 / 100
 if %TMP_TABLE_MB% gtr 2048 set TMP_TABLE_MB=2048
 
-:: Thread Pool
+
 set /a THREAD_POOL_SIZE=%NUMBER_OF_PROCESSORS% * 2
 if %THREAD_POOL_SIZE% lss 8 set THREAD_POOL_SIZE=8
 if %THREAD_POOL_SIZE% gtr 64 set THREAD_POOL_SIZE=64
 
-:: Max Connections
+
 set /a MAX_CONNECTIONS=100 + (%RAM_GB% * 10)
 if %MAX_CONNECTIONS% lss 150 set MAX_CONNECTIONS=150
 if %MAX_CONNECTIONS% gtr 500 set MAX_CONNECTIONS=500
 
-:: InnoDB Log File Size (ขึ้นกับ RAM)
+
 if %RAM_GB% lss 16 (
     set LOG_FILE_SIZE=512M
 ) else if %RAM_GB% lss 32 (
@@ -101,7 +96,7 @@ if %RAM_GB% lss 16 (
 
 echo [OK] คำนวณเสร็จสิ้น
 
-:: แสดงค่าที่จะใช้
+
 echo.
 echo =========================================
 echo  ค่า Config ที่จะใช้:
@@ -116,7 +111,7 @@ echo Log File Size: %LOG_FILE_SIZE%
 echo =========================================
 echo.
 
-:: ยืนยันก่อนดำเนินการ
+
 set /p CONFIRM="ต้องการดำเนินการต่อหรือไม่? (Y/N): "
 if /i not "%CONFIRM%"=="Y" (
     echo ยกเลิกการดำเนินการ
@@ -124,7 +119,7 @@ if /i not "%CONFIRM%"=="Y" (
     exit /b 0
 )
 
-:: สร้าง config ใหม่
+
 echo.
 echo [4/5] กำลังสร้าง config ใหม่...
 
@@ -231,11 +226,11 @@ if %errorLevel% equ 0 (
     exit /b 1
 )
 
-:: ถามว่าจะ restart service หรือไม่
+
 echo.
 echo [5/5] กำลังตรวจสอบ MariaDB Service...
 
-:: ตรวจสอบว่า service ชื่ออะไร
+
 set SERVICE_NAME=
 for /f "tokens=2" %%a in ('sc query state^=all ^| findstr /i "MariaDB MySQL"') do (
     set SERVICE_NAME=%%a
