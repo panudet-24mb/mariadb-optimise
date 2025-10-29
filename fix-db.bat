@@ -20,15 +20,16 @@ set "MARIADB_PATH=D:\Program Files\MariaDB 10.6"
 set "DATA_PATH=%MARIADB_PATH%\data"
 set "CONFIG_FILE=%DATA_PATH%\my.ini"
 
-:: Create backup filename
+:: Create backup timestamp
 for /f "tokens=2-4 delims=/ " %%a in ('date /t') do (set mydate=%%c%%a%%b)
 for /f "tokens=1-2 delims=/:" %%a in ('time /t') do (set mytime=%%a%%b)
-set "BACKUP_FILE=%DATA_PATH%\my.ini.backup.%mydate%_%mytime%"
+set "BACKUP_TIMESTAMP=%mydate%_%mytime%"
+set "BACKUP_SUFFIX=.old.%BACKUP_TIMESTAMP%"
 
 echo File Locations:
 echo =========================================
 echo Config: %CONFIG_FILE%
-echo Backup: %BACKUP_FILE%
+echo Backup Suffix: %BACKUP_SUFFIX%
 echo =========================================
 echo.
 
@@ -39,17 +40,26 @@ if not exist "%CONFIG_FILE%" (
     exit /b 1
 )
 
-:: Backup
+:: Read OLD log_file_size from current config
+set OLD_LOG_SIZE=unknown
+for /f "tokens=2 delims==" %%a in ('findstr /i "innodb_log_file_size" "%CONFIG_FILE%" 2^>nul') do (
+    set OLD_LOG_SIZE=%%a
+)
+set OLD_LOG_SIZE=%OLD_LOG_SIZE: =%
+echo [INFO] Current log file size: %OLD_LOG_SIZE%
+
+:: Backup config file (rename)
+echo.
 echo [1/5] Backing up config...
-copy "%CONFIG_FILE%" "%BACKUP_FILE%" >nul 2>&1
+copy "%CONFIG_FILE%" "%CONFIG_FILE%%BACKUP_SUFFIX%" >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Backup failed!
     pause
     exit /b 1
 )
-echo [OK] Backup successful
+echo [OK] Config backup: %CONFIG_FILE%%BACKUP_SUFFIX%
 
-:: Detect RAM using PowerShell - MORE ACCURATE
+:: Detect RAM using PowerShell
 echo.
 echo [2/5] Detecting RAM...
 
@@ -94,6 +104,12 @@ if %RAM_GB% lss 16 (
 
 echo [OK] Calculation done
 
+:: Check if log file size changed
+set LOG_SIZE_CHANGED=NO
+if /i not "%OLD_LOG_SIZE%"=="%LOG_FILE_SIZE%" (
+    set LOG_SIZE_CHANGED=YES
+)
+
 :: Display values
 echo.
 echo =========================================
@@ -105,7 +121,11 @@ echo Buffer Instances: %BUFFER_POOL_INSTANCES%
 echo Tmp Table: %TMP_TABLE_MB% MB
 echo Thread Pool: %THREAD_POOL_SIZE%
 echo Max Connections: %MAX_CONNECTIONS%
-echo Log File Size: %LOG_FILE_SIZE% (%LOG_FILE_SIZE_NUM% MB)
+echo.
+echo Log File Size:
+echo   Old: %OLD_LOG_SIZE%
+echo   New: %LOG_FILE_SIZE% (%LOG_FILE_SIZE_NUM% MB)
+echo   Changed: %LOG_SIZE_CHANGED%
 echo =========================================
 echo.
 
@@ -211,7 +231,7 @@ echo write_buffer=2M
 
 if errorlevel 1 (
     echo [ERROR] Failed to create config!
-    copy "%BACKUP_FILE%" "%CONFIG_FILE%" >nul 2>&1
+    copy "%CONFIG_FILE%%BACKUP_SUFFIX%" "%CONFIG_FILE%" >nul 2>&1
     pause
     exit /b 1
 )
@@ -221,44 +241,147 @@ echo [OK] Config created
 echo.
 echo [5/5] Service Management
 echo =========================================
-echo WARNING: Log file size changed
-echo Old: 50M
-echo New: %LOG_FILE_SIZE% (%LOG_FILE_SIZE_NUM% MB)
-echo Must delete old ib_logfile files
-echo =========================================
-echo.
 
-set SERVICE_NAME=MariaDB
-
-set /p RESTART="Restart MariaDB automatically? (Y/N): "
-if /i "%RESTART%"=="Y" (
+if "%LOG_SIZE_CHANGED%"=="YES" (
+    echo WARNING: Log file size CHANGED!
+    echo Old: %OLD_LOG_SIZE%
+    echo New: %LOG_FILE_SIZE%
     echo.
-    echo Stopping MariaDB...
-    net stop %SERVICE_NAME% 2>nul
+    echo *** Will RENAME ib_logfile files ***
+    echo *** No files will be deleted ***
+    echo =========================================
+    echo.
     
-    timeout /t 3 /nobreak >nul
-    
-    echo Deleting old log files...
-    del "%DATA_PATH%\ib_logfile*" 2>nul
-    
-    echo Starting MariaDB...
-    net start %SERVICE_NAME%
-    
-    timeout /t 3 /nobreak >nul
-    
-    if errorlevel 1 (
-        echo [ERROR] Failed to start!
-        echo Check: %DATA_PATH%\mysql-error.log
-        pause
-        exit /b 1
+    set /p RESTART="Restart MariaDB and RENAME log files? (Y/N): "
+    if /i "!RESTART!"=="Y" (
+        echo.
+        echo Stopping MariaDB...
+        net stop MariaDB 2>nul
+        
+        timeout /t 3 /nobreak >nul
+        
+        :: Rename ib_logfile files
+        echo Renaming old log files...
+        set RENAME_SUCCESS=YES
+        
+        if exist "%DATA_PATH%\ib_logfile0" (
+            ren "%DATA_PATH%\ib_logfile0" "ib_logfile0%BACKUP_SUFFIX%" 2>nul
+            if errorlevel 1 (
+                echo [ERROR] Failed to rename ib_logfile0
+                set RENAME_SUCCESS=NO
+            ) else (
+                echo [OK] Renamed: ib_logfile0 -^> ib_logfile0%BACKUP_SUFFIX%
+            )
+        )
+        
+        if exist "%DATA_PATH%\ib_logfile1" (
+            ren "%DATA_PATH%\ib_logfile1" "ib_logfile1%BACKUP_SUFFIX%" 2>nul
+            if errorlevel 1 (
+                echo [ERROR] Failed to rename ib_logfile1
+                set RENAME_SUCCESS=NO
+            ) else (
+                echo [OK] Renamed: ib_logfile1 -^> ib_logfile1%BACKUP_SUFFIX%
+            )
+        )
+        
+        :: Check if old files still exist
+        if exist "%DATA_PATH%\ib_logfile0" (
+            echo [ERROR] ib_logfile0 still exists!
+            echo Cannot start MariaDB with old log files
+            echo.
+            echo Please manually:
+            echo 1. Rename: ren "%DATA_PATH%\ib_logfile0" "ib_logfile0%BACKUP_SUFFIX%"
+            echo 2. Rename: ren "%DATA_PATH%\ib_logfile1" "ib_logfile1%BACKUP_SUFFIX%"
+            echo 3. Start: net start MariaDB
+            pause
+            exit /b 1
+        )
+        
+        if "!RENAME_SUCCESS!"=="YES" (
+            echo [OK] All log files renamed successfully
+        ) else (
+            echo [WARNING] Some files could not be renamed
+        )
+        
+        :: Start MariaDB
+        echo.
+        echo Starting MariaDB with new log file size...
+        echo MariaDB will create new ib_logfile files: %LOG_FILE_SIZE%
+        net start MariaDB
+        
+        timeout /t 5 /nobreak >nul
+        
+        sc query MariaDB | find "RUNNING" >nul
+        if errorlevel 1 (
+            echo [ERROR] MariaDB failed to start!
+            echo.
+            echo To restore:
+            echo 1. ren "%DATA_PATH%\ib_logfile0%BACKUP_SUFFIX%" "ib_logfile0"
+            echo 2. ren "%DATA_PATH%\ib_logfile1%BACKUP_SUFFIX%" "ib_logfile1"
+            echo 3. copy "%CONFIG_FILE%%BACKUP_SUFFIX%" "%CONFIG_FILE%"
+            echo 4. net start MariaDB
+            echo.
+            echo Check error log: %DATA_PATH%\mysql-error.log
+            pause
+            exit /b 1
+        )
+        
+        echo [OK] MariaDB started successfully!
+        echo.
+        echo New ib_logfile files created with size: %LOG_FILE_SIZE%
+        echo Old files preserved as:
+        echo   - ib_logfile0%BACKUP_SUFFIX%
+        echo   - ib_logfile1%BACKUP_SUFFIX%
+        
+        timeout /t 3 /nobreak >nul
+        
+        :: Check if new files created
+        if exist "%DATA_PATH%\ib_logfile0" (
+            echo.
+            echo [INFO] New log files confirmed:
+            dir "%DATA_PATH%\ib_logfile0" | find "ib_logfile0"
+            dir "%DATA_PATH%\ib_logfile1" | find "ib_logfile1"
+        )
+        
+    ) else (
+        echo.
+        echo Manual restart steps:
+        echo 1. net stop MariaDB
+        echo 2. ren "%DATA_PATH%\ib_logfile0" "ib_logfile0%BACKUP_SUFFIX%"
+        echo 3. ren "%DATA_PATH%\ib_logfile1" "ib_logfile1%BACKUP_SUFFIX%"
+        echo 4. net start MariaDB
     )
-    echo [OK] MariaDB restarted successfully
 ) else (
+    echo Log file size NOT changed
+    echo Old: %OLD_LOG_SIZE%
+    echo New: %LOG_FILE_SIZE%
     echo.
-    echo Manual restart steps:
-    echo 1. Run: net stop MariaDB
-    echo 2. Delete: %DATA_PATH%\ib_logfile*
-    echo 3. Run: net start MariaDB
+    echo *** NO need to rename ib_logfile ***
+    echo =========================================
+    echo.
+    
+    set /p RESTART="Restart MariaDB? (Y/N): "
+    if /i "!RESTART!"=="Y" (
+        echo.
+        echo Restarting MariaDB...
+        net stop MariaDB 2>nul
+        timeout /t 2 /nobreak >nul
+        net start MariaDB
+        
+        sc query MariaDB | find "RUNNING" >nul
+        if errorlevel 1 (
+            echo [ERROR] MariaDB failed to start!
+            echo Check: %DATA_PATH%\mysql-error.log
+            pause
+            exit /b 1
+        )
+        echo [OK] MariaDB restarted successfully
+    ) else (
+        echo.
+        echo Remember to restart MariaDB:
+        echo   net stop MariaDB
+        echo   net start MariaDB
+    )
 )
 
 echo.
@@ -269,18 +392,49 @@ echo.
 echo [Config File]
 echo %CONFIG_FILE%
 echo.
-echo [Backup File]
-echo %BACKUP_FILE%
+echo [Config Backup]
+echo %CONFIG_FILE%%BACKUP_SUFFIX%
 echo.
+if "%LOG_SIZE_CHANGED%"=="YES" (
+    echo [Old Log Files - RENAMED, NOT DELETED]
+    if exist "%DATA_PATH%\ib_logfile0%BACKUP_SUFFIX%" (
+        echo %DATA_PATH%\ib_logfile0%BACKUP_SUFFIX%
+    )
+    if exist "%DATA_PATH%\ib_logfile1%BACKUP_SUFFIX%" (
+        echo %DATA_PATH%\ib_logfile1%BACKUP_SUFFIX%
+    )
+    echo.
+    echo [New Log Files]
+    if exist "%DATA_PATH%\ib_logfile0" (
+        echo %DATA_PATH%\ib_logfile0
+    )
+    if exist "%DATA_PATH%\ib_logfile1" (
+        echo %DATA_PATH%\ib_logfile1
+    )
+    echo.
+)
 echo Verify with SQL:
 echo   SHOW VARIABLES LIKE 'innodb_buffer_pool_size';
 echo   SHOW VARIABLES LIKE 'max_connections';
 echo   SHOW VARIABLES LIKE 'innodb_log_file_size';
 echo.
-echo To restore backup:
-echo   copy "%BACKUP_FILE%" "%CONFIG_FILE%"
-echo   net stop MariaDB
-echo   net start MariaDB
+echo To restore config:
+echo   copy "%CONFIG_FILE%%BACKUP_SUFFIX%" "%CONFIG_FILE%"
+echo.
+if "%LOG_SIZE_CHANGED%"=="YES" (
+    echo To restore old log files:
+    echo   net stop MariaDB
+    echo   del "%DATA_PATH%\ib_logfile*" ^(delete new files^)
+    echo   ren "%DATA_PATH%\ib_logfile0%BACKUP_SUFFIX%" "ib_logfile0"
+    echo   ren "%DATA_PATH%\ib_logfile1%BACKUP_SUFFIX%" "ib_logfile1"
+    echo   copy "%CONFIG_FILE%%BACKUP_SUFFIX%" "%CONFIG_FILE%"
+    echo   net start MariaDB
+    echo.
+    echo You can safely delete old files after confirming everything works:
+    echo   del "%DATA_PATH%\ib_logfile0%BACKUP_SUFFIX%"
+    echo   del "%DATA_PATH%\ib_logfile1%BACKUP_SUFFIX%"
+    echo   del "%CONFIG_FILE%%BACKUP_SUFFIX%"
+)
 echo =========================================
 echo.
 
