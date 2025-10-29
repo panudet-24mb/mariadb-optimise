@@ -21,9 +21,9 @@ set "DATA_PATH=%MARIADB_PATH%\data"
 set "CONFIG_FILE=%DATA_PATH%\my.ini"
 
 :: Create backup filename
-set "TIMESTAMP=%date:~-4%%date:~-10,2%%date:~-7,2%_%time:~0,2%%time:~3,2%%time:~6,2%"
-set "TIMESTAMP=%TIMESTAMP: =0%"
-set "BACKUP_FILE=%DATA_PATH%\my.ini.backup.%TIMESTAMP%"
+for /f "tokens=2-4 delims=/ " %%a in ('date /t') do (set mydate=%%c%%a%%b)
+for /f "tokens=1-2 delims=/:" %%a in ('time /t') do (set mytime=%%a%%b)
+set "BACKUP_FILE=%DATA_PATH%\my.ini.backup.%mydate%_%mytime%"
 
 echo File Locations:
 echo =========================================
@@ -49,29 +49,14 @@ if errorlevel 1 (
 )
 echo [OK] Backup successful
 
-:: Detect RAM - FIXED VERSION
+:: Detect RAM using PowerShell - MORE ACCURATE
 echo.
 echo [2/5] Detecting RAM...
-for /f "skip=1 tokens=2 delims==" %%a in ('wmic computersystem get TotalPhysicalMemory /value 2^>nul') do (
-    set RAM_BYTES=%%a
-)
 
-:: Remove any spaces or carriage returns
-set RAM_BYTES=%RAM_BYTES: =%
-set RAM_BYTES=%RAM_BYTES:~0,-1%
-
-if not defined RAM_BYTES (
-    echo [ERROR] Cannot detect RAM
-    pause
-    exit /b 1
-)
-
-:: Convert bytes to MB then GB (divide by 1048576 for MB, then 1024 for GB)
-set /a RAM_MB=%RAM_BYTES% / 1048576
-set /a RAM_GB=%RAM_MB% / 1024
+for /f "usebackq delims=" %%i in (`powershell -command "[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB)"`) do set RAM_GB=%%i
+set /a RAM_MB=%RAM_GB% * 1024
 
 echo [OK] RAM: %RAM_GB% GB (%RAM_MB% MB)
-echo      Raw bytes: %RAM_BYTES%
 
 :: Calculate values
 echo.
@@ -251,11 +236,15 @@ if /i "%RESTART%"=="Y" (
     echo Stopping MariaDB...
     net stop %SERVICE_NAME% 2>nul
     
+    timeout /t 3 /nobreak >nul
+    
     echo Deleting old log files...
     del "%DATA_PATH%\ib_logfile*" 2>nul
     
     echo Starting MariaDB...
     net start %SERVICE_NAME%
+    
+    timeout /t 3 /nobreak >nul
     
     if errorlevel 1 (
         echo [ERROR] Failed to start!
@@ -263,10 +252,10 @@ if /i "%RESTART%"=="Y" (
         pause
         exit /b 1
     )
-    echo [OK] MariaDB restarted
+    echo [OK] MariaDB restarted successfully
 ) else (
     echo.
-    echo Manual restart required:
+    echo Manual restart steps:
     echo 1. Run: net stop MariaDB
     echo 2. Delete: %DATA_PATH%\ib_logfile*
     echo 3. Run: net start MariaDB
