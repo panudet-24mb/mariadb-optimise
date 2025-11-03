@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 
 echo.
 echo =========================================
-echo  MariaDB 11.3 Auto Configuration Script
+echo  MariaDB 10.11 Auto Configuration Script
 echo =========================================
 echo.
 
@@ -16,7 +16,7 @@ if %errorLevel% neq 0 (
 )
 
 :: MariaDB Path - EDIT THIS LINE if different
-set "MARIADB_PATH=D:\Program Files\MariaDB 11.3"
+set "MARIADB_PATH=D:\Program Files\MariaDB 10.11"
 set "DATA_PATH=%MARIADB_PATH%\data"
 set "CONFIG_FILE=%DATA_PATH%\my.ini"
 
@@ -40,9 +40,25 @@ if not exist "%CONFIG_FILE%" (
     exit /b 1
 )
 
-:: Backup config file
+:: Read OLD redo log capacity from current config (10.11+)
+set OLD_REDO_SIZE=unknown
+for /f "tokens=2 delims==" %%a in ('findstr /i "innodb_redo_log_capacity" "%CONFIG_FILE%" 2^>nul') do (
+    set OLD_REDO_SIZE=%%a
+)
+set OLD_REDO_SIZE=%OLD_REDO_SIZE: =%
+
+:: Also check for old parameter name (for migration)
+if "%OLD_REDO_SIZE%"=="unknown" (
+    for /f "tokens=2 delims==" %%a in ('findstr /i "innodb_log_file_size" "%CONFIG_FILE%" 2^>nul') do (
+        set OLD_REDO_SIZE=%%a ^(old parameter^)
+    )
+)
+set OLD_REDO_SIZE=%OLD_REDO_SIZE: =%
+echo [INFO] Current redo log capacity: %OLD_REDO_SIZE%
+
+:: Backup config file (rename)
 echo.
-echo [1/4] Backing up config...
+echo [1/5] Backing up config...
 copy "%CONFIG_FILE%" "%CONFIG_FILE%%BACKUP_SUFFIX%" >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Backup failed!
@@ -53,7 +69,7 @@ echo [OK] Config backup: %CONFIG_FILE%%BACKUP_SUFFIX%
 
 :: Detect RAM using PowerShell
 echo.
-echo [2/4] Detecting RAM...
+echo [2/5] Detecting RAM...
 
 for /f "usebackq delims=" %%i in (`powershell -command "[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB)"`) do set RAM_GB=%%i
 set /a RAM_MB=%RAM_GB% * 1024
@@ -62,7 +78,7 @@ echo [OK] RAM: %RAM_GB% GB (%RAM_MB% MB)
 
 :: Calculate values
 echo.
-echo [3/4] Calculating values...
+echo [3/5] Calculating values...
 set /a BUFFER_POOL_MB=%RAM_MB% * 75 / 100
 set /a BUFFER_POOL_INSTANCES=%RAM_GB% / 4
 if %BUFFER_POOL_INSTANCES% lss 4 set BUFFER_POOL_INSTANCES=4
@@ -79,16 +95,24 @@ set /a MAX_CONNECTIONS=100 + (%RAM_GB% * 10)
 if %MAX_CONNECTIONS% lss 150 set MAX_CONNECTIONS=150
 if %MAX_CONNECTIONS% gtr 500 set MAX_CONNECTIONS=500
 
-:: Redo Log Capacity based on RAM (MariaDB 11.3+)
+:: Redo Log Capacity (10.11+) - replaces innodb_log_file_size
+:: Recommended: 1GB - 8GB for most systems
 if %RAM_GB% lss 16 (
-    set REDO_LOG_CAPACITY=512M
-) else if %RAM_GB% lss 32 (
     set REDO_LOG_CAPACITY=1G
-) else if %RAM_GB% lss 64 (
+    set REDO_LOG_CAPACITY_NUM=1024
+) else if %RAM_GB% lss 32 (
     set REDO_LOG_CAPACITY=2G
-) else (
+    set REDO_LOG_CAPACITY_NUM=2048
+) else if %RAM_GB% lss 64 (
     set REDO_LOG_CAPACITY=4G
+    set REDO_LOG_CAPACITY_NUM=4096
+) else (
+    set REDO_LOG_CAPACITY=8G
+    set REDO_LOG_CAPACITY_NUM=8192
 )
+
+:: Calculate binlog expire in seconds (5 days = 432000 seconds)
+set /a BINLOG_EXPIRE_SECONDS=5 * 24 * 3600
 
 echo [OK] Calculation done
 
@@ -97,13 +121,19 @@ echo.
 echo =========================================
 echo Configuration Values:
 echo =========================================
+echo MariaDB Version: 10.11
 echo RAM: %RAM_GB% GB (%RAM_MB% MB)
 echo Buffer Pool: %BUFFER_POOL_MB% MB
 echo Buffer Instances: %BUFFER_POOL_INSTANCES%
 echo Tmp Table: %TMP_TABLE_MB% MB
 echo Thread Pool: %THREAD_POOL_SIZE%
 echo Max Connections: %MAX_CONNECTIONS%
-echo Redo Log Capacity: %REDO_LOG_CAPACITY%
+echo.
+echo Redo Log Capacity (New in 10.11):
+echo   Old: %OLD_REDO_SIZE%
+echo   New: %REDO_LOG_CAPACITY% (%REDO_LOG_CAPACITY_NUM% MB)
+echo.
+echo Binlog Expire: %BINLOG_EXPIRE_SECONDS% seconds (5 days)
 echo =========================================
 echo.
 
@@ -116,20 +146,21 @@ if /i not "%CONFIRM%"=="Y" (
 
 :: Create config
 echo.
-echo [4/4] Creating config...
+echo [4/5] Creating config...
 
 (
 echo [mysqld]
 echo datadir=%MARIADB_PATH:\=/%/data
 echo port=3306
 echo.
-echo # Auto-generated: %date% %time%
+echo # Auto-generated for MariaDB 10.11: %date% %time%
 echo # RAM: %RAM_GB% GB ^(%RAM_MB% MB^)
-echo # MariaDB 11.3 Configuration
 echo.
 echo # InnoDB Buffer Pool ^(75%% of RAM^)
 echo innodb_buffer_pool_size=%BUFFER_POOL_MB%M
 echo innodb_buffer_pool_instances=%BUFFER_POOL_INSTANCES%
+echo.
+echo # InnoDB Redo Log ^(10.11+ uses innodb_redo_log_capacity^)
 echo innodb_redo_log_capacity=%REDO_LOG_CAPACITY%
 echo innodb_log_buffer_size=128M
 echo innodb_flush_log_at_trx_commit=1
@@ -166,10 +197,6 @@ echo # Table Cache
 echo table_open_cache=4096
 echo table_definition_cache=2048
 echo.
-echo # Query Cache ^(Disabled by default in MariaDB 10.5+^)
-echo query_cache_type=0
-echo query_cache_size=0
-echo.
 echo # Character Set
 echo character-set-server=utf8mb4
 echo collation-server=utf8mb4_unicode_ci
@@ -186,7 +213,7 @@ echo.
 echo # Binary Log
 echo binlog_format=MIXED
 echo max_binlog_size=200M
-echo binlog_expire_logs_seconds=432000
+echo binlog_expire_logs_seconds=%BINLOG_EXPIRE_SECONDS%
 echo sync_binlog=1
 echo.
 echo # Replication
@@ -218,36 +245,39 @@ echo [OK] Config created
 
 :: Service restart
 echo.
-echo =========================================
-echo Service Management
+echo [5/5] Service Management
 echo =========================================
 echo.
-echo MariaDB 11.3 can change redo log capacity dynamically.
-echo A restart is recommended to apply all settings.
+echo [INFO] MariaDB 10.11 uses new redo log system
+echo       No need to rename/delete old ib_logfile* files
+echo       Redo logs are in: data\#innodb_redo\
+echo =========================================
 echo.
 
 set /p RESTART="Restart MariaDB? (Y/N): "
-if /i "!RESTART!"=="Y" (
+if /i "%RESTART%"=="Y" (
     echo.
     echo Restarting MariaDB...
     net stop MariaDB 2>nul
     timeout /t 3 /nobreak >nul
     net start MariaDB
     
-    timeout /t 3 /nobreak >nul
+    timeout /t 5 /nobreak >nul
     
     sc query MariaDB | find "RUNNING" >nul
     if errorlevel 1 (
         echo [ERROR] MariaDB failed to start!
-        echo Check: %DATA_PATH%\mysql-error.log
         echo.
         echo To restore:
         echo   copy "%CONFIG_FILE%%BACKUP_SUFFIX%" "%CONFIG_FILE%"
         echo   net start MariaDB
+        echo.
+        echo Check error log: %DATA_PATH%\mysql-error.log
         pause
         exit /b 1
     )
-    echo [OK] MariaDB restarted successfully
+    
+    echo [OK] MariaDB restarted successfully!
 ) else (
     echo.
     echo Remember to restart MariaDB:
@@ -266,16 +296,22 @@ echo.
 echo [Config Backup]
 echo %CONFIG_FILE%%BACKUP_SUFFIX%
 echo.
+echo [Redo Log Location - MariaDB 10.11+]
+echo %DATA_PATH%\#innodb_redo\
+echo.
 echo Verify with SQL:
 echo   SHOW VARIABLES LIKE 'innodb_buffer_pool_size';
 echo   SHOW VARIABLES LIKE 'max_connections';
 echo   SHOW VARIABLES LIKE 'innodb_redo_log_capacity';
+echo   SELECT @@innodb_version;
 echo.
 echo To restore config:
 echo   copy "%CONFIG_FILE%%BACKUP_SUFFIX%" "%CONFIG_FILE%"
 echo   net stop MariaDB
 echo   net start MariaDB
 echo.
+echo You can delete backup after confirming everything works:
+echo   del "%CONFIG_FILE%%BACKUP_SUFFIX%"
 echo =========================================
 echo.
 
